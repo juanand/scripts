@@ -1,0 +1,55 @@
+# VS Code settings and local editor history, at any folder depth
+.vscode/
+*.code-workspace
+.history/
+
+# Local environment configuration; retain sanitized examples
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+
+# Python virtual environments and generated files
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+.tox/
+.nox/
+
+# Analysis caches, test results, and coverage reports
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+TestResults/
+test-results/
+TestResults.xml
+coverage.xml
+
+# PowerShell, Python, and Bash session history
+ConsoleHost_history.txt
+.python_history
+.bash_history
+
+# Logs, temporary files, and editor backups
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+[Dd]esktop.ini
