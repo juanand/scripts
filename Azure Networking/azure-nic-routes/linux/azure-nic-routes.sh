@@ -32,6 +32,8 @@ simple_usage() {
 simple_os_release() (
     local release_file=${1:-/etc/os-release} ID='' ID_LIKE='' VERSION_ID=''
     [[ -f $release_file && -r $release_file ]] || simple_fail 'Cannot read OS metadata.'
+    # os-release is runtime metadata, not a static library dependency.
+    # shellcheck source=/dev/null
     . "$release_file" || simple_fail 'Cannot load OS metadata.'
     [[ -n $ID ]] || simple_fail 'OS metadata has no ID.'
     printf '%s\n' "$ID" "$ID_LIKE" "$VERSION_ID"
@@ -39,7 +41,7 @@ simple_os_release() (
 simple_check_os() {
     local metadata
     local -a metadata_lines=()
-    metadata=$(simple_os_release) || simple_fail 'Cannot determine OS metadata.'
+    metadata=$(simple_os_release /etc/os-release) || simple_fail 'Cannot determine OS metadata.'
     mapfile -t metadata_lines <<< "$metadata"
     printf 'OS: ID=%s VERSION_ID=%s ID_LIKE=%s\n' "${metadata_lines[0]}" "${metadata_lines[2]:-(not set)}" "${metadata_lines[1]:-(not set)}"
 }
@@ -124,7 +126,7 @@ simple_cloud_policy() {
             defaults[$source]=$table
         else simple_fail "Custom policy routing requires manual review. Offending rule: $line"; fi
     done <<< "$rules"
-    [[ ${#mandatory[@]} == 4 && ${#direct[@]} -gt 0 && ${#direct[@]} == ${#defaults[@]} && ${#direct[@]} == ${#simple_addresses[@]} ]] || simple_fail 'Incomplete nm-cloud-setup-compatible policy; manual review required.'
+    [[ ${#mandatory[@]} == 4 && ${#direct[@]} -gt 0 && ${#direct[@]} == "${#defaults[@]}" && ${#direct[@]} == "${#simple_addresses[@]}" ]] || simple_fail 'Incomplete nm-cloud-setup-compatible policy; manual review required.'
     command -v nmcli >/dev/null || simple_fail 'Cloud policy compatibility requires native NetworkManager.'
     for source in "${!direct[@]}"; do
         table=${direct[$source]}
@@ -394,6 +396,8 @@ simple_netplan_render() {
         read -r cidr gateway metric source table remainder <<< "$entry"
         simple_canonical "$cidr"
         simple_number "$gateway" >/dev/null || simple_fail 'Invalid overlay gateway.'
+        # Both the decimal format and range must pass; either failure is fatal.
+        # shellcheck disable=SC2015
         [[ $metric =~ ^[1-9][0-9]{0,9}$ ]] && ((10#$metric <= 4294967295)) || simple_fail 'Invalid overlay metric.'
         if [[ $source == table=254 && -z $table ]]; then source=''
         else
@@ -410,6 +414,8 @@ simple_netplan_trust() {
     [[ ! -L $path && -r $path ]] || simple_fail "Unreadable or symlinked Netplan configuration: $path"
     details=$(stat -c '%u %a' -- "$path") || simple_fail 'Cannot inspect Netplan file ownership.'
     read -r owner mode <<< "$details"
+    # Ownership, mode format and write permissions must all pass.
+    # shellcheck disable=SC2015
     [[ $owner == 0 && $mode =~ ^[0-7]{3,4}$ ]] && (( (8#$mode & 0022) == 0 )) || simple_fail 'Netplan configuration must be root-owned and not group/world writable.'
 }
 simple_netplan_manifest() {
@@ -563,6 +569,8 @@ simple_networkd_configuration() {
     local device=$1 index reply signature resolved_index path extra state
     command -v systemctl >/dev/null || return 0
     systemctl is-active --quiet systemd-networkd || return 0
+    # Missing either native tool must stop ownership discovery.
+    # shellcheck disable=SC2015
     command -v busctl >/dev/null && command -v networkctl >/dev/null || simple_fail 'Active networkd requires its installed busctl and networkctl tools.'
     read -r index < "/sys/class/net/$device/ifindex" || simple_fail 'Cannot read interface index.'
     [[ $index =~ ^[1-9][0-9]*$ ]] || simple_fail 'Invalid interface index.'
@@ -1039,6 +1047,8 @@ simple_main() (
                 [[ -z $operation ]] || simple_fail 'Choose only one of --rollback or --reset.'
                 operation=${arg#--} ;;
             --map|--gateway|--metric)
+                # Check existence before expanding $1; either invalid condition aborts.
+                # shellcheck disable=SC2015
                 (($#)) && [[ -n $1 && $1 != --* ]] || simple_fail "Missing argument for $arg"
                 case $arg in
                     --map) simple_maps+=("$1") ;;
@@ -1049,6 +1059,8 @@ simple_main() (
             *) simple_fail "Unknown argument: $arg" ;;
         esac
     done
+    # Both the decimal format and range must pass; either failure is fatal.
+    # shellcheck disable=SC2015
     [[ $simple_metric =~ ^[1-9][0-9]{0,9}$ ]] && ((10#$simple_metric <= 4294967295)) || simple_fail '--metric must be an integer from 1 through 4294967295.'
     simple_check_os
     if $simple_apply; then execution=apply; fi
@@ -1058,6 +1070,8 @@ simple_main() (
     command -v ip >/dev/null || simple_fail 'iproute2 is required.'
     if $simple_apply; then simple_root; fi
     if [[ -n $operation ]]; then
+        # Cleanup rejects both route parameters and a persistence flag.
+        # shellcheck disable=SC2015
         ((${#simple_maps[@]} == 0 && ${#simple_overrides[@]} == 0)) && ! $simple_persist || simple_fail 'Cleanup is separate from maps, gateway overrides and --persist; saved routes are included automatically.'
         [[ $operation != reset ]] || ! $metric_explicit || simple_fail '--reset removes all custom metrics; use --metric with --rollback instead.'
         simple_cleanup "$operation"; return
