@@ -40,6 +40,30 @@ certificate_thumbprint() {
     printf '%s\n' "${fingerprint,,}"
 }
 
+describe_certificate() {
+    local certificate=$1 details extension label fingerprint
+    details=$(openssl x509 -in "$certificate" -noout -nameopt RFC2253 \
+        -subject -issuer -dates 2>/dev/null) ||
+        fail "Cannot read certificate details: $certificate"
+    printf '%s\n' "$details"
+    fingerprint=$(certificate_thumbprint -in "$certificate") ||
+        fail "Cannot read certificate thumbprint: $certificate"
+    printf 'SHA-256 thumbprint:\n  %s\n' "${fingerprint^^}"
+    for extension in subjectKeyIdentifier authorityKeyIdentifier; do
+        case $extension in
+            subjectKeyIdentifier) label='Subject Key Identifier' ;;
+            authorityKeyIdentifier) label='Authority Key Identifier' ;;
+        esac
+        details=$(openssl x509 -in "$certificate" -noout -ext "$extension" 2>/dev/null) ||
+            fail "Cannot read $label from $certificate"
+        if [[ $details == *'X509v3 '* ]]; then
+            printf '%s\n' "$details"
+        else
+            printf '%s: not present\n' "$label"
+        fi
+    done
+}
+
 scan_certificate_file() {
     local source=$1 line ending normalized block='' end_marker='' fingerprint
     scan_original=''
@@ -259,7 +283,8 @@ remove_selected_actions() {
             done < <(find "$root" \( -type f -o -type l \) -print0 2>/dev/null || printf '\0')
         done
         message "Selected certificates: ${#removal_thumbprints[@]}" \
-            "Matching certificates in trust sources: $match_count"
+            "Matching certificates in trust sources: $match_count" \
+            "System CA bundle: $bundle" "Trust update: ${removal_update_command[*]}"
     fi
 
     original=''
@@ -278,10 +303,14 @@ remove_selected_actions() {
                 cleaned=$original
             fi
         fi
-        message 'Environment cleanup includes matching entries and installer-owned profile and systemd files.'
+        message "Environment cleanup: matching entries in $environment_file"
+        for target in "${managed_configuration_files[@]}"; do
+            message "Configuration selected for removal: $target"
+        done
     fi
-    if (( validate_only )); then
-        message 'Removal preflight passed. No changes made.'
+    if (( ! apply_changes )); then
+        message 'Removal preview complete. No changes made.' \
+            'Add --apply to execute the selected removal actions.'
         return
     fi
     (( EUID == 0 )) || fail 'Removal requires root. Rerun with sudo; automatic elevation is not performed.'
@@ -339,7 +368,7 @@ remove_selected_actions() {
     fail 'Bash 4.4 or later is required.'
 declare -A removal_thumbprints=()
 removal_temporary_files=()
-validate_only=0
+apply_changes=0
 remove_mode=0
 remove_certs=0
 remove_vars=0
@@ -348,37 +377,41 @@ apply_vars=0
 (( $# > 0 )) || set -- --help
 while (( $# > 0 )); do
 case $1 in
-    --validate-only) validate_only=1; shift ;;
+    --apply) apply_changes=1; shift ;;
     --removecerts) remove_certs=1; shift ;;
     --removevars) remove_vars=1; shift ;;
     --removeall) remove_certs=1; remove_vars=1; shift ;;
-    --applycerts) apply_certs=1; shift ;;
-    --applyvars) apply_vars=1; shift ;;
-    --applyall) apply_certs=1; apply_vars=1; shift ;;
+    --installcerts) apply_certs=1; shift ;;
+    --installvars) apply_vars=1; shift ;;
+    --installall) apply_certs=1; apply_vars=1; shift ;;
     --help|-h)
-        message "Usage: bash \"${0##*/}\" [ACTION ...] [--validate-only]" \
+        message "Usage: bash \"${0##*/}\" [ACTION ...] [--apply]" \
             '' \
             'No arguments show this help only, even when running as root.' \
+            'Actions preview by default. Add --apply to install or remove anything.' \
             '' \
             'Actions:' \
-            '  --applycerts     Install certificates and rebuild system trust only.' \
-            '  --applyvars      Configure CA environment defaults only.' \
-            '  --applyall       Apply certificates and environment defaults.' \
+            '  --installcerts   Install certificates and rebuild system trust only.' \
+            '  --installvars    Configure CA environment defaults only.' \
+            '  --installall     Install certificates and environment defaults.' \
             '  --removecerts    Remove certificates selected by certs/*.crt only.' \
             '  --removevars     Remove installer CA environment settings only.' \
             '  --removeall      Remove certificates and environment settings.' \
             '' \
             'Options:' \
-            '  --validate-only  Check the selected actions without changing files or trust.' \
+            '  --apply          Execute the selected actions instead of previewing.' \
             '  --help, -h       Show this help.' \
             '' \
             'Installation:' \
-            'Nothing is installed unless an action is explicitly selected.' \
-            '--applycerts copies certs/*.crt unchanged; it does not change environment settings.' \
-            '--applyvars does not read certs or rebuild trust; existing readable PEM and Java stores are required.' \
+            'Nothing is installed unless an action and --apply are selected.' \
+            '--installcerts copies certs/*.crt unchanged; it does not change environment settings.' \
+            '--installvars does not read certs or rebuild trust; existing readable PEM and Java stores are required.' \
             'Environment defaults require running systemd and distribution Java CA integration.' \
-            'Use --applycerts --applyvars together, or --applyall, to apply both.' \
-            'Removal actions cannot be combined with apply actions.' \
+            'Use --installcerts --installvars together, or --installall, to select both.' \
+            'Removal actions cannot be combined with installation actions.' \
+            'Certificate installation requires OpenSSL and one readable PEM certificate per .crt file.' \
+            'Both preview and apply show subject, issuer, validity dates, SHA-256 thumbprint, key identifiers, source, destination, and bundle path.' \
+            'Parsing certificate data does not establish CA suitability or trust.' \
             '' \
             'Removal:' \
             'Use --removecerts --removevars together, or --removeall, to remove both.' \
@@ -410,17 +443,27 @@ esac
 done
 remove_mode=$((remove_certs || remove_vars))
 if (( remove_mode && (apply_certs || apply_vars) )); then
-    fail 'Removal actions cannot be combined with --applycerts, --applyvars, or --applyall.'
+    fail 'Removal actions cannot be combined with --installcerts, --installvars, or --installall.'
 fi
 (( remove_mode || apply_certs || apply_vars )) ||
-    fail 'Select an apply or removal action. Use --help for usage.'
+    fail 'Select an installation or removal action. --apply alone does not select an action. Use --help for usage.'
+if (( apply_changes )); then
+    message 'Mode: APPLY - selected changes will be made after preflight.'
+else
+    message 'Mode: PREVIEW - no changes will be made.'
+fi
 [[ $(uname -s) == Linux ]] || fail 'Run this script on Linux.'
 
 for utility in cp chmod mkdir dirname awk mktemp mv rm; do
     command -v "$utility" >/dev/null 2>&1 || fail "Missing required utility: $utility"
 done
+if (( apply_certs || remove_certs )); then
+    for utility in openssl grep; do
+        command -v "$utility" >/dev/null 2>&1 || fail "Missing required utility: $utility"
+    done
+fi
 if (( remove_certs )); then
-    for utility in openssl find grep readlink; do
+    for utility in find readlink; do
         command -v "$utility" >/dev/null 2>&1 || fail "Missing required utility: $utility"
     done
 fi
@@ -457,6 +500,7 @@ if (( apply_vars )); then
 fi
 
 certificates=()
+declare -A certificate_details=()
 if (( apply_certs || remove_certs )); then
     script_directory=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
     shopt -s nullglob
@@ -466,6 +510,10 @@ if (( apply_certs || remove_certs )); then
     for certificate in "${certificates[@]}"; do
         [[ -f $certificate && -r $certificate && ! -L $certificate ]] || fail "Not a readable regular certificate file: $certificate"
         (( remove_certs )) && continue
+        scan_certificate_file "$certificate"
+        [[ $scan_count == 1 && -z $scan_der ]] ||
+            fail "Expected one PEM certificate per installation input: $certificate"
+        certificate_details["$certificate"]=$(describe_certificate "$certificate")
         destination=$trust_directory/${certificate##*/}
         [[ ! -L $destination ]] || fail 'A certificate destination is a symbolic link.'
         [[ ! -e $destination || -f $destination ]] || fail "Not a regular destination file: $destination"
@@ -523,25 +571,46 @@ if (( apply_vars )); then
     java_options=$(merge_java_options "$java_options" "$java_truststore")
 fi
 
-if (( validate_only )); then
-    if (( apply_certs )); then
-        message "Certificate preflight passed: ${#certificates[@]} .crt file(s)." \
-            "Destination: $trust_directory" 'Certificate contents were not validated.'
-    fi
-    if (( apply_vars )); then
-        message 'Environment preflight passed.' "Profile: $ca_profile" \
-            "Systemd drop-in: $ca_systemd" "PEM bundle: $bundle" "Java store: $java_truststore"
-    fi
-    message 'No changes made.'
+if (( apply_certs )); then
+    message "Certificates selected for installation: ${#certificates[@]}"
+    for certificate in "${certificates[@]}"; do
+        destination=$trust_directory/${certificate##*/}
+        message '' "Source: $certificate" "Destination: $destination" \
+            "${certificate_details["$certificate"]}"
+        if [[ -e $destination ]]; then
+            message 'An existing destination file will be overwritten.'
+        fi
+    done
+    message '' "System CA bundle: $bundle" "Trust update: ${update_command[*]}" \
+        'Certificate data parsed successfully. CA suitability and trust were not validated.'
+fi
+if (( apply_vars )); then
+    message '' 'Environment configuration selected for installation:' \
+        'Environment file: /etc/environment' "Profile: $ca_profile" \
+        "Systemd drop-in: $ca_systemd" "PEM bundle: $bundle" "Java store: $java_truststore"
+    for name in REQUESTS_CA_BUNDLE CURL_CA_BUNDLE SSL_CERT_FILE NODE_EXTRA_CA_CERTS; do
+        message "$name=$bundle"
+    done
+    message "JAVA_TOOL_OPTIONS: preserve supported options and select $java_truststore"
+    for target in "${managed_configuration_files[@]}"; do
+        if [[ $target != "$ca_profile" && $target != "$ca_systemd" ]]; then
+            message "Superseded configuration selected for removal: $target"
+        fi
+    done
+fi
+if (( ! apply_changes )); then
+    message 'Preview complete. No changes made.' \
+        'Add --apply to execute the selected installation actions.'
     exit 0
 fi
-(( EUID == 0 )) || fail 'Applying the selected actions requires root. Rerun with sudo; automatic elevation is not performed.'
+(( EUID == 0 )) || fail 'Installing the selected actions requires root. Rerun with sudo; automatic elevation is not performed.'
 
 if (( apply_certs )); then
     mkdir -p -m 0755 -- "$trust_directory"
     for certificate in "${certificates[@]}"; do
         cp -f -- "$certificate" "$trust_directory/${certificate##*/}"
         chmod 0644 -- "$trust_directory/${certificate##*/}"
+        message "Installed certificate: $trust_directory/${certificate##*/}"
     done
     if command -v restorecon >/dev/null 2>&1; then
         for certificate in "${certificates[@]}"; do
@@ -550,7 +619,7 @@ if (( apply_certs )); then
     fi
     "${update_command[@]}" 2>&1 | fold -s -w 78
     [[ -s $bundle && -r $bundle ]] || fail 'The trust updater did not produce the expected readable system CA bundle.'
-    message 'Certificates copied and system trust rebuilt.'
+    message 'Certificates copied and system trust rebuilt.' "System CA bundle: $bundle"
 fi
 (( apply_vars )) || exit 0
 [[ -f $java_truststore && -s $java_truststore && -r $java_truststore ]] || fail 'The trust updater did not leave a readable Java truststore. CA environment settings were not changed.'
