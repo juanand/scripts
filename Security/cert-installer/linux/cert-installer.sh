@@ -243,7 +243,7 @@ replace_contents() {
 }
 
 remove_selected_actions() {
-    local environment_file=$1 root source resolved certificate fingerprint original cleaned current
+    local environment_file=$1 root source resolved certificate fingerprint original cleaned current details
     local match_count=0
     local -a link_sources=() regular_sources=()
     local -A originals=() replacements=() der_sources=() deletions=() input_sources=()
@@ -256,6 +256,9 @@ remove_selected_actions() {
             removal_thumbprints["${scan_hashes[0]}"]=1
             resolved=$(readlink -f -- "$certificate")
             input_sources["$resolved"]=1
+            details=$(describe_certificate "$certificate")
+            message '' 'Certificate selected for removal (input file is kept):' \
+                "Source: $certificate" "$details"
         done
         for root in "${removal_directories[@]}"; do
             [[ -e $root || -L $root ]] || continue
@@ -417,6 +420,7 @@ case $1 in
             'Use --removecerts --removevars together, or --removeall, to remove both.' \
             '--removecerts does not inspect or change environment configuration.' \
             '--removevars does not read certs or rebuild trust; OpenSSL is not required.' \
+            'Both preview and apply show the same certificate details as installation for each removal input.' \
             'Matches SHA-256 certificate thumbprints, not filenames or file hashes.' \
             'Metadata before PEM headers and different PEM formatting do not change certificate identity.' \
             'Removes matching local and vendor CA sources, even if installed by another tool.' \
