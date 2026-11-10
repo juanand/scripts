@@ -105,7 +105,7 @@ File-selection overrides can replace client-specific trust. Use the complete upd
 
 ### Choose the Narrowest Scope
 
-For application-specific needs, prefer a one-command override or the application's launcher/service configuration. Use system-wide login settings only when the policy should apply to all relevant users. The examples below use Rocky/RHEL paths; substitute the Debian/Ubuntu paths from the table where appropriate. Choose only the variables needed by the application, not every row in the table.
+For application-specific needs, prefer a one-command override or the application's launcher/service configuration. For a VM baseline with a shared service policy, manager-wide systemd defaults are also an option, with per-service exceptions where needed. Use system-wide login settings only when the policy should apply to all relevant users. The examples below use Rocky/RHEL paths; substitute the Debian/Ubuntu paths from the table where appropriate. Choose only the variables needed by the application, not every row in the table.
 
 #### One Command or Application
 
@@ -125,7 +125,7 @@ When the launcher cannot be edited, the equivalent variable value is `JAVA_TOOL_
 
 #### Systemd Services
 
-For a system service, prefer a per-service drop-in, not shell profiles or a manager-wide setting. Use `sudo systemctl edit "{service}.service"`, replacing `{service}` with the actual unit name, and add only the required setting under `[Service]`:
+For application-specific settings, use a per-service drop-in. Run `sudo systemctl edit "{service}.service"`, replacing `{service}` with the actual unit name. Without `--full`, this creates or edits `/etc/systemd/system/{service}.service.d/override.conf`, not the vendor's main unit file. Add only the required setting under `[Service]`:
 
 ```ini
 [Service]
@@ -145,7 +145,51 @@ That file contains plain assignments such as `REQUESTS_CA_BUNDLE=/etc/pki/tls/ce
 
 Reload unit configuration with `sudo systemctl daemon-reload` and schedule `sudo systemctl restart "{service}.service"` when interruption is acceptable. A daemon reload alone does not change a running process's environment. The bundle path must also be readable inside any service sandbox or container.
 
-See [systemd execution environments](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#Environment=). Avoid global `DefaultEnvironment=` in `/etc/systemd/system.conf.d/` unless the settings truly belong in all system services; it is a separate mechanism from a service drop-in and can affect unrelated programs. See [systemd manager configuration](https://www.freedesktop.org/software/systemd/man/latest/systemd-system.conf.html#DefaultEnvironment=).
+See [systemd execution environments](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#Environment=). For a shared service baseline instead, use the [manager-wide defaults](#system-wide-service-defaults-systemd) below.
+
+#### System-Wide Service Defaults: systemd
+
+Use this approach when the VM's policy deliberately supplies common client trust settings to system services, including services added later. As root, create a drop-in such as `/etc/systemd/system.conf.d/60-{scriptname}.conf`, typically root-owned with mode `0644` and not writable by ordinary users:
+
+```ini
+[Manager]
+DefaultEnvironment="REQUESTS_CA_BUNDLE=/etc/pki/tls/certs/ca-bundle.crt"
+```
+
+This is manager configuration, not a service unit or shell script: use `[Manager]` and a `.conf` file, not `[Service]`, `.sh`, or `/etc/systemd.d/`. Add only approved variables as quoted `NAME=value` assignments; do not use `export`, shell conditionals, or `$VARIABLE` expansion.
+
+The system service manager supplies these defaults to processes it launches, including services running under non-root accounts. They are defaults, not enforced trust policy. They do not update existing processes or guarantee inheritance by every login session, user service, or container. Shell-login defaults remain a separate scope, covered by `/etc/profile.d/` below.
+
+**Per-service exceptions**
+
+To replace a global value for one service, use `sudo systemctl edit "{service}.service"` and specify the desired value under `[Service]`. For example, after preparing a suitable application-specific PEM bundle, replace `{service}` in this path too:
+
+```ini
+[Service]
+Environment="REQUESTS_CA_BUNDLE=/etc/{service}/ca-bundle.crt"
+```
+
+For the same variable, per-service `Environment=` overrides `DefaultEnvironment=`, and `EnvironmentFile=` overrides `Environment=`. If the service uses `PAMName=`, its PAM configuration can override those values too. Inspect existing assignments rather than assuming a new drop-in is the only source.
+
+To opt out of that variable entirely for one service instead, use:
+
+```ini
+[Service]
+UnsetEnvironment=REQUESTS_CA_BUNDLE
+```
+
+`UnsetEnvironment=` requires systemd 235 or later and removes the variable after all environment sources have been combined. Do not combine the replacement and opt-out examples for the same variable: unsetting wins. An empty value such as `Environment="REQUESTS_CA_BUNDLE="` is not removal, and a bare `Environment=` resets the unit's assignments rather than clearing manager defaults. Opting out of one variable does not remove other CA overrides or disable TLS verification; test the application's resulting trust behavior. On older systemd versions without this opt-out, prefer per-service settings when exceptions are needed.
+
+**Activation and considerations**
+
+- For manager-wide changes, schedule `sudo systemctl daemon-reexec` and restart affected services during an approved maintenance window, or use a planned reboot. Reexecution does not itself restart services or replace their existing environments. For changes confined to a per-service drop-in, use the `daemon-reload` and service-restart procedure above. Apply the same activation steps after removing a global setting.
+- Inspect the manager defaults with `systemctl show-environment` and a service's unit/drop-ins with `systemctl cat "{service}.service"`. The manager output does not include per-service overrides, and neither command proves what a running application inherited or which CA store it uses. Verify application TLS connections after restart.
+- Review existing manager drop-ins and their filename ordering. Later assignments to the same variable can replace earlier values; preserve unrelated defaults instead of clearing the whole `DefaultEnvironment=` list.
+- Use only necessary variables and complete, appropriate trust stores. Ensure each path exists and is readable inside the affected service's filesystem view, including sandboxes and containers. These settings cannot force applications to honor environment-based CA configuration.
+- Be particularly cautious with global `JAVA_TOOL_OPTIONS`: it can change unrelated JVMs' trust-store selection. A per-service value replaces the entire variable, not just its trust-store option; preserve required JVM arguments explicitly. Use a Java-format store, not a PEM bundle, and prefer per-service Java settings when requirements differ.
+- Keep these files limited to non-secret settings. Environment variables can be exposed through service introspection and inherited by child processes; do not put passwords or private keys in them.
+
+Official references: [systemd manager configuration and drop-in precedence](https://www.freedesktop.org/software/systemd/man/latest/systemd-system.conf.html#DefaultEnvironment=), [service environment assignments](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#Environment=), [final environment removal](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#UnsetEnvironment=), and [systemctl manager reexecution](https://www.freedesktop.org/software/systemd/man/latest/systemctl.html#daemon-reexec).
 
 #### System-Wide Login Settings: /etc/environment
 
