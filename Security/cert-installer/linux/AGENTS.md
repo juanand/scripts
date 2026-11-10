@@ -1,49 +1,49 @@
 # Agent Guidelines
 
-## Purpose and Current State
+## Scope
 
-- Maintain a Bash installer for trusted CA certificates on Debian and RHEL Linux families, with environment defaults pointing supported clients to the updated trust stores.
-- See [README.md](README.md) for usage, supported environments, limitations, and validation commands. There is currently no automated test suite. Keep implementation focused on shell scripts; do not introduce an application framework.
-- Derive help, the `# Managed by {scriptname}` ownership marker, and generated profile `.sh` and systemd `.conf` basenames from the current invocation name, stripping only a final `.sh` suffix. Recognize only the current name's marker; users must remove variables under the old name before renaming an installed copy. Preserve other names' markers, unmarked files, and symlink targets; certificate-only actions must not discover or change environment files.
-- No arguments must show help only, regardless of privileges. Require an explicit apply or removal action; `--validate-only` must accompany an action. Reject combinations of removal and apply actions. See [README.md](README.md) for all switches.
-- Keep certificate and variable application independent: `--applycerts` must not inspect or change environment configuration or require Java/systemd; `--applyvars` must not read certificate inputs or invoke or require the trust updater. Both switches together must behave like `--applyall`, completing all preflight checks before changes.
-- Keep removal independent: `--removecerts` must not inspect or change environment configuration; `--removevars` must not read certificate inputs, inspect trust stores, or require OpenSSL or the trust updater. Both switches together must behave like `--removeall`, completing all preflight checks before changes.
-- Variable application requires distribution Java trust-store integration, readable trust stores, and a running systemd instance. Certificate-only application and removal do not require these runtime prerequisites. Do not silently install or enable them or reload or restart service managers.
-- Keep user-facing output within 78 columns for 80-column consoles, and report the detected OS before operational preflight checks. Never wrap certificate bytes or generated configuration.
-- Certificate removal intentionally removes matching certificates regardless of installation provenance. Match decoded X.509 SHA-256 thumbprints, not filenames or file hashes; preserve unrelated certificates and leave input files unchanged. See [README.md](README.md) for source-directory coverage and limitations.
-- Removal must not create persistent state or backup directories. Variable removal must preserve unrelated settings, removing only matching environment values and the matching Java trust-store token. Certificate removal must verify selected certificates are absent from the rebuilt PEM bundle before reporting success.
+- These guidelines apply to `linux/` only. Maintain a certificate-only Bash installer for trusted CA certificates on Debian and RHEL Linux families; do not introduce an application framework.
+- Neither action may inspect, create, modify, remove, or migrate environment settings, JVM options, shell profiles, service-manager configuration, or ownership markers.
+- Do not require Java or running systemd, install packages or runtimes, automatically elevate privileges, change proxies, disable TLS verification, or reload/restart services.
+- Keep [README.md](README.md) as the user/administrator guide and maintain [manual client trust guidance](README.md#Manual-Client-Trust-Configuration) there, backed by official client/runtime references.
 
-## Certificate and Shell Conventions
+## Behavioral Invariants
 
-- Discover `certs/*.crt` relative to the script's location, not the caller's working directory. Handle spaces in paths, empty matches, unreadable inputs, and symbolic-link destinations explicitly.
-- Expect PEM/base64-encoded CA certificates, one certificate per file; an extension alone does not establish encoding or CA suitability. Copy accepted certificates without changing their bytes.
-- Use Bash, quoted expansions, arrays for file lists and commands, and deliberate error handling under `set -euo pipefail`.
-- Check prerequisites before changing system state. Reject unsupported distributions clearly; do not silently install packages or elevate privileges.
-- Make repeated runs idempotent. Preserve unrelated environment settings and JVM options, reject conflicting trust-store settings, and avoid overwriting unowned configuration files.
+- Derive help from the current invocation name; the script must remain renameable. Use `{scriptname}` placeholders in administrator command examples.
+- No arguments must show help only, regardless of privileges. Support only `--installcerts` and `--removecerts` actions. Require root and `--apply` with an explicit action to make changes; reject conflicting actions and all retired aliases.
+- Without `--apply`, both actions preview and are strictly read-only, even as root: no temporary files, certificate copying/removal, trust-update invocation, or other mutations.
+- Keep all user-facing output, including trust-updater output, within 78 columns. Report the detected OS before distribution-specific preflight checks.
+- Both actions must show subject, issuer, validity dates, SHA-256 thumbprint, subject/authority key identifiers, input source, and bundle path in preview and apply modes. Reuse the same metadata helper. Installation must show the full destination; removal must distinguish kept inputs from matched installed paths and show selected details even with no matches.
+- Removal matches decoded X.509 SHA-256 thumbprints regardless of installation provenance, not filenames or file hashes. Preserve unrelated certificates and other PEM blocks, and leave input files unchanged.
+- Removal must not create persistent state or backup directories. Verify selected certificates are absent from the rebuilt PEM bundle before reporting success.
+- Make repeated installation and removal runs idempotent.
 
-## Linux Trust Stores
+## Shell Conventions
 
-- Detect the family using `ID` and `ID_LIKE` in `/etc/os-release`; check the required trust-update utility before installation.
-- Use the distribution's trust updater rather than editing generated bundles directly:
+- Use Bash 4.4 or later, quoted expansions, arrays for file lists and commands, and deliberate error handling under `set -euo pipefail`.
+- Discover `certs/*.crt` relative to the script's location, not the caller's working directory. Reject input symlinks; handle spaces, empty matches, unreadable inputs, and unsafe destination symlinks explicitly.
+- Parse exactly one PEM/base64-encoded certificate per input before writes. An extension does not establish encoding, and parsing does not establish CA suitability, validity, or issuer trust. Copy accepted certificates without changing their bytes.
+- Detect the family using `ID` and `ID_LIKE` in `/etc/os-release`. Check prerequisites, including the trust-update utility, before changing system state; reject unsupported distributions clearly.
+- Use the distribution's trust updater for the selected action; never edit generated bundles directly. See the README for [trust-source coverage and removal limitations](README.md#removal-actions) and [bundle paths](README.md#pem-bundles-and-java-trust-stores).
 
-| Family                      | CA Anchor Directory                  | Trust Update                | PEM Bundle                             |
-| --------------------------- | ------------------------------------ | --------------------------- | -------------------------------------- |
-| Debian/Ubuntu               | `/usr/local/share/ca-certificates` | `update-ca-certificates`  | `/etc/ssl/certs/ca-certificates.crt` |
-| RHEL/Fedora and derivatives | `/etc/pki/ca-trust/source/anchors` | `update-ca-trust extract` | `/etc/pki/tls/certs/ca-bundle.crt`   |
+## Verification
 
-- Preserve system trust and TLS verification. Do not introduce insecure client flags, proxy changes, or automatic service restarts.
+- There is no automated test suite. After script changes, run Bash syntax checks, then ShellCheck when installed. Use a Linux Bash environment; prefer WSL when developing on Windows/PowerShell. Report missing tools.
+- Never use installation or removal as a syntax check, or source the top-level installer as a test helper.
+- Run installation or removal with `--apply` only with explicit authorization in disposable Debian-family and RHEL-family Linux systems, never against the development host's trust store.
 
-## Environment Semantics
+Run checks from this directory, substituting the current filename if renamed:
 
-- Consider `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, and `SSL_CERT_FILE` for clients that honor them. Explain that overrides may replace client-specific defaults rather than extend them.
-- `NODE_EXTRA_CA_CERTS` adds certificates to Node defaults at process startup; explicit application TLS `ca` settings can bypass it.
-- Java requires a Java-format trust store, not the PEM bundle. Verify distribution integration and the readable OS-generated store, typically `/etc/ssl/certs/java/cacerts` on Debian or `/etc/pki/java/cacerts` on RHEL. Do not clobber unrelated `JAVA_TOOL_OPTIONS` or evaluate its contents as shell code.
-- Distinguish PAM environments, login-shell profiles, and service-manager defaults. No file or environment variable reaches every application; existing processes need new environments, and sudo, cron, containers, and applications can override inheritance.
+```bash
+bash -n ./cert-installer.sh
+shellcheck ./cert-installer.sh
+```
 
-## Safe Validation
+For behavioral changes, use guarded temporary fixtures to check the affected cases:
 
-- The installer targets Linux. Use a real Bash environment for shell checks, and report missing tools rather than claiming validation passed. When development is hosted on Windows/PowerShell, prefer WSL when available.
-- Run `bash -n <script>` after each new or repaired script, then `shellcheck <script>` when available. See [README.md](README.md) for current validation commands; never use installation as a syntax check or source the top-level installer as a test helper.
-- Keep `--validate-only` strictly read-only for every selected action: it must not create temporary files, copy or remove certificates, update trust, write configuration, or restart anything.
-- Test installation only with explicit authorization in disposable Debian-family and RHEL-family Linux systems, never against the development host's trust store. Check repeated runs, invocation from another directory, filenames with spaces, missing or malformed inputs, and preservation of existing configuration.
-- Separate syntax/lint results from installation evidence. Containers do not prove PAM, login-shell, or systemd environment propagation; test those contexts separately when supported.
+- No-argument help and both previews as a normal user and root, with mutation commands blocked; usage errors and rejection of retired options.
+- Repeated runs, renamed scripts, invocation from another directory, spaces in paths, missing/malformed/multiple input certificates, and symlink safety.
+- Certificate metadata, absent key identifiers, and output width; byte-preserved inputs, mixed-certificate/other-PEM-block preservation, and unchanged legacy environment/profile/systemd files.
+- Post-update removal verification, including failure when a selected certificate remains in the rebuilt bundle.
+
+Report commands actually run, results, and remaining gaps. Distinguish syntax/lint and fixture evidence from real distribution trust-updater integration and application trust; stubbed updaters do not prove either.
