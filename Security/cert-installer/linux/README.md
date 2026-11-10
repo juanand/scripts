@@ -2,7 +2,7 @@
 
 This human-tested, vibe-coded script installs or removes local CA certificates on Debian/Ubuntu and RHEL/Fedora systems from the script-relative `./certs` folder. Every action previews by default, including when run with sudo; add `--apply` to make changes. Without parameters it only displays help. Certificate removal matches certificate thumbprints without requiring installation records or a backup directory.
 
-The script manages certificates only. It never installs, removes, or migrates environment variables, shell profiles, or systemd configuration. Optional client-specific settings are documented in [Manual Client Trust Configuration](#manual-client-trust-configuration).
+The script manages certificates only. Client-specific environment settings are configured manually. It never installs, removes, or migrates environment variables, shell profiles, or systemd configuration. Optional client-specific settings are documented in [Manual Client Trust Configuration](#manual-client-trust-configuration) for reference.
 
 ## Requirements
 
@@ -28,11 +28,11 @@ bash "./{scriptname}.sh" --removecerts
 sudo bash "./{scriptname}.sh" --removecerts --apply
 ```
 
-`--installcerts` selects certificate copying and trust rebuilding; `--removecerts` selects thumbprint-based removal and trust rebuilding. They cannot be combined. The former variable actions and combined "all" actions are no longer supported.
+`--installcerts` selects certificate copying and trust rebuilding; `--removecerts` selects thumbprint-based removal and trust rebuilding. They cannot be combined. 
 
-Selecting an action only previews its plan. Add `--apply` to execute it; this applies equally to installation and removal. Running as root or using sudo does not bypass preview mode. No arguments show help, and `--apply` alone is a usage error because it selects no action. The previous installation switch names and opt-out validation switch are no longer accepted.
+Selecting an action only previews its plan. Add `--apply` to execute it; this applies equally to installation and removal. Running as root or using sudo does not bypass preview mode. No arguments show help, and `--apply` alone is a usage error because it selects no action. 
 
-The script can be renamed: help uses the current invocation name, and certificate discovery uses the script's containing directory, not the current working directory. Invoke it directly rather than through a symbolic link so it finds the intended `certs` directory. No environment configuration or ownership-marker files are generated.
+The script can be renamed: help uses the current invocation name, and certificate discovery uses the script's containing directory, not the current working directory. Invoke it directly rather than through a symbolic link so it finds the intended `certs` directory.
 
 Operational runs report the detected OS before checking distribution-specific prerequisites. Help, status messages, errors, and displayed trust-updater output wrap at 78 columns to fit an 80-column consoles. Certificate bytes are not wrapped. Help does not require OS detection.
 
@@ -71,7 +71,6 @@ Files are scanned recursively regardless of extension. PEM, trusted PEM, and sin
 When certificate removal is executed with `--apply`, the script rebuilds trust with `update-ca-certificates --fresh` or `update-ca-trust extract`. It checks the resulting system PEM bundle and returns an error if selected certificates remain trusted through another source. Generated bundles are never edited directly. No persistent state or backup directory is created; temporary replacement files are cleaned up on exit.
 
 This is removal, not restoration of historical state. It cannot restore overwritten certificates. Package updates can reinstall vendor certificates. Private application stores, separately maintained Java stores, and p11-kit policy files are not scanned. If a selected certificate remains in the rebuilt bundle, inspect those other trust-policy sources. Failures after source files have changed are not automatically rolled back; resolve the reported problem and rerun `--removecerts --apply` to finish cleanup.
-
 
 ## Manual Client Trust Configuration
 
@@ -219,12 +218,6 @@ fi
 Use analogous assignments only for other clients that need them. Non-login shells, non-shell applications, systemd services, scheduled jobs, and containers do not universally read these files. Existing sessions are not changed; start a new login shell or deliberately source the reviewed snippet for the current shell. Prefer a user's own login profile instead when only that user needs the setting.
 
 Choose either a PAM environment default or a shell-profile default for a given login policy instead of duplicating conflicting assignments in both. The `/etc/profile.d/` inclusion is a distribution convention, so inspect `/etc/profile` on the target VM. Reference: [Bash startup files](https://www.gnu.org/software/bash/manual/html_node/Bash-Startup-Files.html).
-
-### Existing Configuration from Older Versions
-
-This version does not discover or clean up environment settings created by older versions. Those versions may have written `/etc/environment`, `/etc/profile.d/{scriptname}.sh`, and `/etc/systemd/system.conf.d/{scriptname}.conf` using the script name at that time.
-
-Review and back up those files manually before editing. Remove only obsolete assignments or files whose contents you have confirmed were dedicated to this setup; preserve custom paths, unrelated settings, and other `JAVA_TOOL_OPTIONS` arguments. Do not delete all profile or systemd files based on a broad filename pattern. New sessions are needed to drop inherited login variables. If an old systemd manager `DefaultEnvironment=` drop-in was activated, schedule a manager reexecution (`systemctl daemon-reexec`) and affected service restarts, or a reboot, as appropriate; a unit-only `daemon-reload` is not a substitute. The script performs none of these actions.
 
 ### Additional References
 
