@@ -68,13 +68,13 @@ check_config() {
     [[ $output == *'Preview only; no files or services will be changed.'* ]] ||
       fail "$name: expected a configuration preview."
     for key in http_proxy HTTP_PROXY; do
-      [[ $output == *"+Environment=\"$key=$http\""* ]] || fail "$name: missing $key."
+      [[ $output == *"+Environment=\"$key=${http//%/%%}\""* ]] || fail "$name: missing $key."
     done
     for key in https_proxy HTTPS_PROXY; do
-      [[ $output == *"+Environment=\"$key=$https\""* ]] || fail "$name: missing $key."
+      [[ $output == *"+Environment=\"$key=${https//%/%%}\""* ]] || fail "$name: missing $key."
     done
     for key in no_proxy NO_PROXY; do
-      [[ $output == *"+Environment=\"$key=$bypass\""* ]] || fail "$name: missing $key."
+      [[ $output == *"+Environment=\"$key=${bypass//%/%%}\""* ]] || fail "$name: missing $key."
     done
   fi
   passed=$((passed + 1))

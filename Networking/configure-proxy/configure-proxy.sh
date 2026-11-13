@@ -11,10 +11,14 @@ Targets, selected independently:
   --environment          Set all six proxy variables in /etc/environment.
   --profile              Write /etc/profile.d/90-explicit-proxy.sh.
   --sudoers              Write /etc/sudoers.d/90-explicit-proxy.
-  --waagent              Write a waagent.service drop-in if the unit is
-                         available; otherwise warn and skip this target.
+  --waagent              Select an available Azure Linux Agent unit:
+                         waagent.service or walinuxagent.service.
+                         Warn and skip if absent or ambiguous.
   --daemons LIST        Write drop-ins for comma-separated .service unit names.
                          May be repeated. Unavailable units warn and skip.
+  --systemd-manager     Set proxy defaults for newly started system services.
+                         Write /etc/systemd/system.conf.d/NAME.conf.
+                         Explicit opt-in; not included in --alldefaults.
   --alldefaults          Select environment, profile, sudoers and optional waagent.
 
 Values:
@@ -37,9 +41,9 @@ Values:
 
 Example:
   configure-proxy.sh --environment --profile --waagent \
-    --daemons gpfs.service --http_proxy http://proxy.example:8080 \
+    --daemons sample.service --http_proxy http://proxy.example:8080 \
     --https_proxy http://proxy.example:8080 \
-    --no_proxy 'localhost,127.0.0.1,::1,169.254.169.254,168.63.129.16,.local'
+    --no_proxy 'localhost,127.0.0.1,::1,169.254.169.254,168.63.129.16,local'
 
 Preview removal:
   configure-proxy.sh --alldefaults --remove
@@ -51,6 +55,7 @@ The script writes both uppercase and lowercase variables. It manages only the
 six proxy assignments in /etc/environment and its own named files elsewhere.
 Named files use NAME.sh in /etc/profile.d, NAME in /etc/sudoers.d and NAME.conf
 in each selected service's drop-in directory. Previews show the full paths.
+With --systemd-manager, NAME.conf is used in /etc/systemd/system.conf.d.
 Use the same --dropin-name for removal. Changing the name does not rename or
 remove files created with another name; /etc/environment is independent of it.
 Removal deletes current proxy assignments from /etc/environment, including
@@ -58,19 +63,89 @@ ones that existed before this script ran. It does not restore prior values.
 Removal only deletes named files with the script's managed-file header.
 Other configuration files and drop-ins are not removed.
 Service selection checks unit availability, not whether the VM is in Azure.
+The agent shortcut probes both known names without inferring the distribution.
+Aliases select one automatic target; different available units are ambiguous.
+Use --daemons to choose explicitly or to handle a future agent unit rename.
 For --daemons, --waagent and --alldefaults, unavailable or uninspectable services
 warn and skip while other targets continue. Skipped drop-ins are left untouched.
 If systemctl is unavailable, all service targets are skipped with warnings.
+The manager target also warns and skips if the system manager cannot be queried.
+Manager-wide DefaultEnvironment settings affect future service starts, not
+already-running processes, and can be overridden by per-service configuration.
+Only explicitly selected available services are restarted; never all services.
 Systemd is reloaded when drop-ins change. Services are restarted only when
 --restartdaemons is explicitly supplied; even unchanged selected services restart.
 Review bypass matching for each client; CIDR support varies. URLs must not
 contain credentials. Applying changes requires root; sudoers requires visudo.
 Requires bash, awk, diff and standard Linux utilities.
+Designed for modern, supported Linux distributions; no distro/version allowlist.
 EOF
 }
 
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 warn() { printf 'WARNING: %s\n' "$*" >&2; }
+
+service_name_valid() {
+  local LC_ALL=C value=$1
+  [[ $value =~ ^[A-Za-z0-9][A-Za-z0-9_.@:-]*[.]service$ ]]
+}
+
+resolve_waagent() {
+  local unit state identity requested selected
+  local -a available=() identities=()
+  if ! command -v systemctl >/dev/null; then
+    warn 'Skipping --waagent: systemctl is unavailable; cannot inspect waagent.service or walinuxagent.service.'
+    return 1
+  fi
+  for unit in waagent.service walinuxagent.service; do
+    if ! state=$(systemctl show "$unit" --property=LoadState --value 2>&1); then
+      # Some systemctl builds return failure along with the expected not-found state.
+      if [[ $state != not-found ]]; then
+        warn "Could not inspect $unit for --waagent: $state"
+      fi
+      continue
+    fi
+    if [[ $state == loaded ]]; then
+      available+=("$unit")
+    elif [[ -z $state ]]; then
+      warn "Could not inspect $unit for --waagent: no LoadState was returned."
+    fi
+  done
+  if ((${#available[@]} == 0)); then
+    # Explicit selections receive their own availability warnings below.
+    for requested in "$@"; do
+      case "$requested" in waagent.service|walinuxagent.service) return 1 ;; esac
+    done
+    warn 'Skipping --waagent: neither waagent.service nor walinuxagent.service is available. Use --daemons if the agent has another unit name.'
+    return 1
+  fi
+  selected=${available[0]}
+  if ((${#available[@]} == 2)); then
+    for unit in "${available[@]}"; do
+      if ! identity=$(systemctl show "$unit" --property=Id --value 2>&1); then
+        warn "Skipping --waagent: could not determine the identity of $unit: $identity. Select a unit with --daemons."
+        return 1
+      fi
+      if ! service_name_valid "$identity"; then
+        warn "Skipping --waagent: invalid or empty identity for $unit. Select a unit with --daemons."
+        return 1
+      fi
+      identities+=("$identity")
+    done
+    if [[ ${identities[0]} != "${identities[1]}" ]]; then
+      warn 'Skipping --waagent: waagent.service and walinuxagent.service identify different available units. Select the intended unit with --daemons.'
+      return 1
+    fi
+    for requested in "$@"; do
+      if [[ $requested == "${available[0]}" || $requested == "${available[1]}" ||
+            $requested == "${identities[0]}" ]]; then
+        selected=$requested
+        break
+      fi
+    done
+  fi
+  printf '%s\n' "$selected"
+}
 
 dropin_name_valid() {
   local LC_ALL=C value=$1
@@ -215,7 +290,7 @@ validate_no_proxy() {
   done
 }
 
-environment=false profile=false sudoers=false waagent=false apply=false remove=false restart_daemons=false
+environment=false profile=false sudoers=false waagent=false systemd_manager=false apply=false remove=false restart_daemons=false
 dropin_name=90-explicit-proxy
 http_set=false https_set=false no_set=false
 http_proxy_value= https_proxy_value= no_proxy_value=
@@ -226,6 +301,7 @@ while (($#)); do
     --profile) profile=true; shift ;;
     --sudoers) sudoers=true; shift ;;
     --waagent) waagent=true; shift ;;
+    --systemd-manager) systemd_manager=true; shift ;;
     --alldefaults) environment=true; profile=true; sudoers=true; waagent=true; shift ;;
     --apply) apply=true; shift ;;
     --remove) remove=true; shift ;;
@@ -251,7 +327,7 @@ while (($#)); do
   esac
 done
 
-$environment || $profile || $sudoers || $waagent || ((${#daemons[@]})) ||
+$environment || $profile || $sudoers || $waagent || $systemd_manager || ((${#daemons[@]})) ||
   fail "Select at least one configuration target."
 dropin_name_valid "$dropin_name" ||
   fail '--dropin-name must be a basename of 1-250 ASCII letters, digits, underscores or hyphens, starting with a letter or digit; no extension or directory.'
@@ -275,11 +351,14 @@ if ! $remove; then
   validate_no_proxy "$no_proxy_value"
 fi
 
-if $waagent; then daemons+=(waagent.service); fi
+for daemon in "${daemons[@]}"; do
+  service_name_valid "$daemon" || fail "Invalid systemd service unit name: $daemon"
+done
+if $waagent; then
+  if agent_unit=$(resolve_waagent "${daemons[@]}"); then daemons+=("$agent_unit"); fi
+fi
 declare -a unique_daemons=()
 for daemon in "${daemons[@]}"; do
-  [[ $daemon =~ ^[A-Za-z0-9][A-Za-z0-9_.@:-]*[.]service$ ]] ||
-    fail "Invalid systemd service unit name: $daemon"
   duplicate=false
   for existing in "${unique_daemons[@]}"; do
     [[ $existing != "$daemon" ]] || duplicate=true
@@ -300,7 +379,20 @@ for daemon in "${unique_daemons[@]}"; do
   fi
 done
 
-if ! $environment && ! $profile && ! $sudoers && ((${#available_daemons[@]} == 0)); then
+manager_available=false
+if $systemd_manager; then
+  if ! command -v systemctl >/dev/null; then
+    warn 'Skipping systemd manager: systemctl is unavailable.'
+  elif ! manager_version=$(systemctl show --property=Version --value 2>&1); then
+    warn "Skipping systemd manager: could not inspect the manager: $manager_version"
+  elif [[ -z $manager_version ]]; then
+    warn 'Skipping systemd manager: no manager version was returned.'
+  else
+    manager_available=true
+  fi
+fi
+
+if ! $environment && ! $profile && ! $sudoers && ! $manager_available && ((${#available_daemons[@]} == 0)); then
   printf 'No applicable targets; no changes made.\n'
   exit 0
 fi
@@ -337,10 +429,21 @@ render_sudoers() {
   printf 'Defaults env_keep += "http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY"\n'
 }
 
+render_systemd_variables() {
+  local directive=$1 line
+  # systemd expands percent specifiers; double them to preserve literal values.
+  while IFS= read -r line; do printf '%s="%s"\n' "$directive" "${line//%/%%}"; done \
+    < <(render_variables)
+}
+
 render_systemd() {
   printf '# Managed by configure-proxy.sh\n[Service]\n'
-  while IFS= read -r line; do printf 'Environment="%s"\n' "$line"; done \
-    < <(render_variables)
+  render_systemd_variables Environment
+}
+
+render_systemd_manager() {
+  printf '# Managed by configure-proxy.sh\n[Manager]\n'
+  render_systemd_variables DefaultEnvironment
 }
 
 temporary=
@@ -351,7 +454,10 @@ trap cleanup EXIT
 
 changed_systemd=false
 process_target() {
-  local target=$1 renderer=$2 mode=$3 old=/dev/null diff_status
+  local target=$1 renderer=$2 mode=$3 old=/dev/null diff_status systemd_target=false
+  case "$renderer" in
+    render_systemd|render_systemd_manager) systemd_target=true ;;
+  esac
   [[ ! -L $target ]] || fail "Refusing to replace symbolic link: $target"
   if [[ -e $target && ! -f $target ]]; then fail "Not a regular file: $target"; fi
   if [[ -f $target ]]; then
@@ -373,7 +479,7 @@ process_target() {
     ((diff_status <= 1)) || fail "Could not compare $target."
     if ! $apply; then return; fi
     rm -- "$target" || fail "Could not remove $target."
-    if [[ $renderer == render_systemd ]]; then changed_systemd=true; fi
+    if $systemd_target; then changed_systemd=true; fi
     printf 'Removed %s\n' "$target"
     return
   fi
@@ -401,7 +507,7 @@ process_target() {
   fi
   mv -f -- "$temporary" "$target"
   temporary=
-  if [[ $renderer == render_systemd ]]; then changed_systemd=true; fi
+  if $systemd_target; then changed_systemd=true; fi
   if $remove; then printf 'Removed proxy assignments from %s\n' "$target"
   else printf 'Applied %s\n' "$target"; fi
 }
@@ -415,13 +521,19 @@ elif $apply; then
 else
   printf 'Preview only; no files or services will be changed.\n'
 fi
+if $manager_available; then
+  printf 'System-manager target: defaults for newly started service processes; per-service overrides still apply.\n'
+  printf 'Running services keep their environment unless explicitly restarted.\n'
+fi
 $environment && process_target /etc/environment render_environment 0644
 $profile && process_target "/etc/profile.d/${dropin_name}.sh" render_profile 0644
 $sudoers && process_target "/etc/sudoers.d/${dropin_name}" render_sudoers 0440
+$manager_available && process_target "/etc/systemd/system.conf.d/${dropin_name}.conf" render_systemd_manager 0644
 for daemon in "${available_daemons[@]}"; do
   process_target "/etc/systemd/system/${daemon}.d/${dropin_name}.conf" render_systemd 0644
 done
 if $changed_systemd; then
+  printf '\nReloading systemd configuration; host generators may emit warnings.\n'
   systemctl daemon-reload || fail "systemd reload failed; written drop-ins remain on disk."
   printf '\nsystemd configuration reloaded.\n'
 fi
