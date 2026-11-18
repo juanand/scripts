@@ -54,7 +54,7 @@ Seconds to wait for the local tunnel to become ready. Defaults to 45. Valid
 values are 5 through 300.
 
 .EXAMPLE
-.\Connect-AzureBastion.ps1 -Protocol SSH -TargetIpAddress '192.0.2.10' -Username 'vmuser' `
+.\Connect-AzBastionTunnel.ps1 -Protocol SSH -TargetIpAddress '192.0.2.10' -Username 'vmuser' `
     -BastionSubscription 'Example Subscription' -BastionName 'example-bastion' `
     -BastionResourceGroup 'example-network-rg'
 
@@ -63,7 +63,7 @@ if no key succeeds and the VM allows password authentication.
 
 .EXAMPLE
 $vmId = '/subscriptions/<vm-subscription-id>/resourceGroups/<vm-rg>/providers/Microsoft.Compute/virtualMachines/<vm-name>'
-.\Connect-AzureBastion.ps1 -Protocol RDP -TargetResourceId $vmId `
+.\Connect-AzBastionTunnel.ps1 -Protocol RDP -TargetResourceId $vmId `
     -BastionSubscription 'Example Subscription' -BastionName 'example-bastion' `
     -BastionResourceGroup 'example-network-rg'
 
