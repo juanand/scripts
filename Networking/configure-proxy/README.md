@@ -415,3 +415,164 @@ A modern, supported distribution can still have a minimal image that lacks Bash,
 - Other missing utilities can stop processing. Because changes are sequential, inspect any earlier applied targets after a failure.
 
 Install suitable distribution-provided packages if permitted, or omit targets whose prerequisites are unavailable. The script does not install packages, replace tools, or add language runtimes automatically.
+
+## Application-Specific Proxy Configuration
+
+The standard proxy variables are conventions implemented by HTTP clients, not network-routing rules enforced by Linux. An application can inherit all six variables and still ignore them, use another proxy, or apply different bypass rules. Systemd manager defaults distribute environment variables; they do not transparently proxy every connection.
+
+The following guidance is for manual administration. This script manages only `http_proxy`, `https_proxy`, `no_proxy`, and their uppercase equivalents. It does not configure JVM startup options, enable Node.js proxy support, edit application configuration, or configure applications inside containers.
+
+### Set Shared Defaults in the Appropriate Scope
+
+Where a runtime supports environment-based configuration, administrators can supply it centrally instead of editing every application's startup script. Choose the scope deliberately:
+
+| Scope | Where to configure additional runtime variables | Activation and limits |
+| --- | --- | --- |
+| Systemd system services | An administrator-owned `/etc/systemd/system.conf.d/NAME.conf` containing `[Manager]` and `DefaultEnvironment=` assignments | Reload the manager, then start or explicitly restart the affected services. Per-service settings can override the defaults. |
+| One systemd service | A separate `/etc/systemd/system/<unit>.d/NAME.conf` containing `[Service]` and `Environment=` assignments | Reload systemd and restart only that service when safe. Prefer this when a host-wide default is too broad. |
+| Login sessions and their children | `/etc/environment` where loaded by PAM, or an administrator-owned `/etc/profile.d/NAME.sh` for shells that source it | Start a new applicable session. These files are not universally read by every launcher or service. |
+| Systemd user services | `environment.d` configuration, including `/etc/environment.d/*.conf` for defaults shared across user managers | Applies through the user manager's environment generator, not the system manager. Existing processes still need a new start; see the [environment.d documentation](https://www.freedesktop.org/software/systemd/man/latest/environment.d.html). |
+| Containers and isolated workloads | Container environment, build configuration, or the orchestrator's workload configuration | Host environment settings are not automatically forwarded into every container. The application inside must still support the settings. |
+
+Use separate administrator-owned files, with names different from files managed by `--dropin-name`. Do not add these settings to the script's generated profile or systemd fragments: a later apply replaces those files in full. Do not copy its managed-file header into manually maintained files. The script's `--remove` does not undo this additional configuration.
+
+Review and preserve existing variable values before adding runtime options. Systemd `Environment=` and `DefaultEnvironment=` are not shell commands: writing `$JAVA_TOOL_OPTIONS` there does not append the existing value. Compose a complete reviewed value, and escape any literal `%` as `%%` in systemd files. See [manager environment defaults](https://www.freedesktop.org/software/systemd/man/latest/systemd-system.conf.html) and [service environment settings](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html).
+
+### Java, Including Bundled and Embedded JREs
+
+The JDK's default proxy selector uses Java system properties such as `http.proxyHost`, not an automatic translation of the usual Linux proxy variables. The shared `JAVA_TOOL_OPTIONS` environment variable can supply those properties when a compatible JVM starts, including JVMs created through the JNI Invocation API by a native application. This is useful for embedded or bundled JREs whose startup command is not readily editable. See Oracle's [JAVA_TOOL_OPTIONS explanation](https://docs.oracle.com/javase/8/docs/technotes/guides/troubleshoot/envvars002.html), the [JVM tool-options specification](https://docs.oracle.com/en/java/javase/25/docs/specs/jvmti.html#tooloptions), and [networking properties](https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/net/doc-files/net-properties.html).
+
+**This establishes defaults for compatible JVMs that inherit the variable; it cannot force every Java application to use the proxy.** A launcher can remove the variable, a JVM can restrict its use for security reasons, application-supplied options can override properties, and a custom HTTP client or proxy selector may ignore the JDK defaults. Existing JVMs are not reconfigured when the environment changes.
+
+#### Shared Defaults for Java System Services
+
+For a host-wide policy covering subsequently started system services, an administrator could maintain `/etc/systemd/system.conf.d/zz-java-proxy.conf` with:
+
+```ini
+[Manager]
+DefaultEnvironment="JAVA_TOOL_OPTIONS=-Dhttp.proxyHost=proxy.example -Dhttp.proxyPort=8080 -Dhttps.proxyHost=proxy.example -Dhttps.proxyPort=8080 -Dhttp.nonProxyHosts=localhost|127.*|[::1]|example.local|*.example.local"
+```
+
+This avoids adding the same `-D` options to each Java service's startup script. The example assumes `JAVA_TOOL_OPTIONS` has no other required options; if it does, retain them in the composed value and resolve duplicate or conflicting properties. Per-service assignments replace this variable as a whole rather than automatically merging its option string.
+
+After reviewing a manual manager-file change, reload systemd and restart only the intended Java services when safe. No blanket restart is implied. The [older manager-default removal caveat](#manager-default-removal-on-older-builds) also applies to manually maintained defaults.
+
+For a narrower policy, use the same value in an `Environment="JAVA_TOOL_OPTIONS=..."` assignment under `[Service]` in a separate drop-in for the chosen unit.
+
+#### Shared Defaults for Login-Launched Java Applications
+
+For shells that source `/etc/profile.d`, an administrator-owned `/etc/profile.d/zz-java-proxy.sh` can export the same options:
+
+```bash
+export JAVA_TOOL_OPTIONS='-Dhttp.proxyHost=proxy.example -Dhttp.proxyPort=8080 -Dhttps.proxyHost=proxy.example -Dhttps.proxyPort=8080 -Dhttp.nonProxyHosts=localhost|127.*|[::1]|example.local|*.example.local'
+```
+
+Again, merge any existing required options rather than overwriting them. For sessions that load `/etc/environment`, the equivalent is a quoted `JAVA_TOOL_OPTIONS="..."` assignment without `export`; do not use shell expressions to append values there. These are different inheritance scopes from system services, so select the scope or scopes that actually launch your applications.
+
+`sudo` may filter additional runtime variables. This script's sudoers target preserves only the six standard proxy variables, not `JAVA_TOOL_OPTIONS`. Do not blindly allow users to pass arbitrary JVM startup options into privileged commands: those options can load code as well as set proxy properties. Prefer administrator-controlled service configuration or a reviewed, narrowly scoped sudo policy; see the [sudoers manual](https://www.sudo.ws/docs/man/sudoers.man/).
+
+#### Java Proxy and Bypass Syntax
+
+- `http.proxyHost` and `https.proxyHost` take a hostname or address without a URL scheme; their ports are separate properties.
+- HTTPS uses `https.proxyHost` and `https.proxyPort`, but shares **`http.nonProxyHosts`** with HTTP.
+- `http.nonProxyHosts` uses `|` separators and `*` patterns, not the comma-separated `no_proxy` syntax. For a domain and its subdomains, use `example.local|*.example.local`; for the `local` suffix, use `local|*.local`.
+- Do not translate CIDRs or port-qualified bypass entries by merely replacing commas with pipes. Review the JDK's supported matching rules.
+- `java.net.useSystemProxies=true` selects supported platform proxy settings, such as GNOME settings on Linux; it is not a portable instruction to read `http_proxy`.
+- `JDK_JAVA_OPTIONS` is another option for programs launched through the `java` launcher, but is not a substitute for `JAVA_TOOL_OPTIONS` when a native application creates an embedded JVM directly. See the [Java launcher documentation](https://docs.oracle.com/en/java/javase/25/docs/specs/man/java.html#using-the-jdk_java_options-launcher-environment-variable).
+
+### Maven and Gradle
+
+Shared JVM properties can help Java tools that use them, but application-specific transports may have their own settings and precedence. Do not assume a working Java example proves every Maven plugin or Gradle task uses that proxy.
+
+| Tool | Central configuration without changing every startup script | Reference and caveats |
+| --- | --- | --- |
+| Maven | Configure `<proxies>` in `${maven.home}/conf/settings.xml` for an installation-wide default, or `~/.m2/settings.xml` for one user. | [Maven proxy guide](https://maven.apache.org/guides/mini/guide-proxies.html) and [settings locations/precedence](https://maven.apache.org/settings.html). User settings override merged global settings. `nonProxyHosts` uses pipes and wildcards. JVM-property support depends on the transport and is not Maven's universally supported configuration method. |
+| Gradle | Set `systemProp.http.proxyHost`, `systemProp.http.proxyPort`, `systemProp.https.proxyHost`, `systemProp.https.proxyPort`, and `systemProp.http.nonProxyHosts` in a shared user `gradle.properties`, normally `~/.gradle/gradle.properties`. | [Gradle networking](https://docs.gradle.org/current/userguide/networking.html) and [build environment configuration](https://docs.gradle.org/current/userguide/build_environment.html). These define JVM properties for Gradle; project, command-line, and custom client behavior must still be considered. |
+
+An illustrative Gradle configuration is:
+
+```properties
+systemProp.http.proxyHost=proxy.example
+systemProp.http.proxyPort=8080
+systemProp.https.proxyHost=proxy.example
+systemProp.https.proxyPort=8080
+systemProp.http.nonProxyHosts=localhost|127.*|[::1]|example.local|*.example.local
+```
+
+### Node.js Shared Environment Defaults
+
+On Node.js releases that support it, `NODE_USE_ENV_PROXY=1` enables the built-in HTTP clients to use the standard proxy variables already supplied by this script. It can be deployed through the same shared environment scopes as Java, avoiding edits to each application's command line. In an administrator-owned `/etc/systemd/system.conf.d/zz-node-proxy.conf`, for example:
+
+```ini
+[Manager]
+DefaultEnvironment=NODE_USE_ENV_PROXY=1
+```
+
+For applicable login shells, the corresponding profile assignment is:
+
+```bash
+export NODE_USE_ENV_PROXY=1
+```
+
+The standard proxy values must also be present in the application's environment. Reload the appropriate manager and restart affected applications when safe, or start a new login session as applicable. A per-service `Environment=NODE_USE_ENV_PROXY=1` assignment is an alternative when a host-wide default is not appropriate.
+
+Support differs by Node.js release and HTTP API. The official guide documents support for `node:http`, `node:https`, and `fetch()` and the alternative `--use-env-proxy` switch. Older or bundled runtimes may require a proxy-aware client/agent instead; custom agents and third-party libraries can override the defaults. See [Node.js enterprise network configuration](https://nodejs.org/learn/http/enterprise-network-configuration). This script does not set `NODE_USE_ENV_PROXY`.
+
+### Docker Daemon, Containers, and Builds
+
+The Docker daemon supports the standard proxy variables in its startup environment, so this script's `--daemons docker.service` target can configure a conventional system-level Docker service. This does not automatically configure the applications inside its containers.
+
+Docker also recommends explicit daemon configuration in `/etc/docker/daemon.json`, where supported by the installed engine. Merge a fragment such as this into the existing configuration rather than replacing unrelated settings:
+
+```json
+{
+  "proxies": {
+    "http-proxy": "http://proxy.example:8080",
+    "https-proxy": "http://proxy.example:8080",
+    "no-proxy": "localhost,127.0.0.1,example.local"
+  }
+}
+```
+
+Explicit daemon settings take precedence over its environment, and daemon configuration changes require a reviewed Docker restart. Rootless Docker uses a user-level service, not this script's system-service target. Docker Desktop has its own proxy settings. See [Docker daemon proxy configuration](https://docs.docker.com/engine/daemon/proxy/).
+
+For new containers and builds, Docker's separate `~/.docker/config.json` proxy configuration can centrally supply environment variables and build arguments:
+
+```json
+{
+  "proxies": {
+    "default": {
+      "httpProxy": "http://proxy.example:8080",
+      "httpsProxy": "http://proxy.example:8080",
+      "noProxy": "localhost,127.0.0.1,example.local"
+    }
+  }
+}
+```
+
+This configuration applies to new containers/builds created through that client configuration, not to the Docker daemon or existing containers. The same separation applies to orchestrated workloads: pass the required variables through the workload configuration. Java or Node.js inside a container may also need their runtime-specific variables. Do not bake proxy credentials or host-specific proxy settings into images. See [Docker container and build proxy configuration](https://docs.docker.com/engine/cli/proxy/).
+
+### Environment-Aware Tools with Configuration Overrides
+
+These applications can use the standard variables, but their own configuration may take precedence. Check inheritance and existing settings before adding another proxy configuration source.
+
+| Application | Shared environment or application configuration | Official reference |
+| --- | --- | --- |
+| APT | Supports proxy environment settings. An administrator can instead configure `Acquire::http::Proxy` and `Acquire::https::Proxy` in an `/etc/apt/apt.conf.d/` fragment, with host-specific `DIRECT` exceptions where needed. | [APT HTTP transport](https://manpages.debian.org/stable/apt/apt-transport-http.1.en.html) and [HTTPS transport](https://manpages.debian.org/stable/apt/apt-transport-https.1.en.html). |
+| DNF | Uses curl's proxy environment variables when its proxy option is unset. `proxy=` in `/etc/dnf/dnf.conf` or repository configuration provides an explicit alternative; repository settings can override global settings. | [DNF configuration reference](https://dnf.readthedocs.io/en/latest/conf_ref.html#proxy-label). |
+| Git over HTTP(S) | Normally uses proxy environment variables. `http.proxy` in system, user, repository, or URL-scoped Git configuration can override them; `/etc/gitconfig` is the usual machine-wide location. | [Git configuration](https://git-scm.com/docs/git-config). This does not configure Git's SSH transport. |
+| Modern .NET `HttpClient` on Linux | Normally reads the standard environment variables unless the application supplies different handler/proxy behavior. The same login or service environment scopes used by this script can provide shared defaults. | [HttpClient.DefaultProxy](https://learn.microsoft.com/dotnet/api/system.net.http.httpclient.defaultproxy). |
+
+**Bypass matching is still client-specific.** Microsoft documents .NET's undotted `example.local` entry as matching that host, not its subdomains, and `.example.local` as matching subdomains, not the host itself. For those semantics, use both entries, `example.local,.example.local`, when both scopes should bypass the proxy. This differs from clients where an undotted domain already includes subdomains; verify the deployed client rather than mechanically copying bypass lists between ecosystems.
+
+### Browsers and SSH
+
+Firefox supports centrally managed connection settings through its enterprise `Proxy` policy, including manual proxy configuration, operating-system settings, and a PAC URL. Deploying a policy can avoid editing each browser profile, but setting systemd environment variables alone is not equivalent to configuring the browser's selected proxy mode. The `Passthrough` bypass syntax is also application-specific; for example, `<local>` refers to names without a dot, not the DNS suffix `local`. See the [Firefox proxy policy reference](https://firefox-admin-docs.mozilla.org/reference/policies/proxy/).
+
+OpenSSH does not use HTTP proxy variables as a general transport setting. Configure `ProxyCommand` with a suitable HTTP CONNECT-capable helper when an approved HTTP proxy must carry SSH traffic, or use `ProxyJump` for an SSH jump host. The latter is not an HTTP-proxy URL. Host-scoped rules in `/etc/ssh/ssh_config` can provide machine-wide defaults; `~/.ssh/config` provides user-specific configuration. This also applies to Git remotes that use SSH. See [OpenSSH client configuration](https://man.openbsd.org/ssh_config#ProxyCommand).
+
+### Verify the Application, Not Only Its Environment
+
+After configuring a shared default, verify the actual application's outbound request and bypass behavior with an authorized destination. A variable appearing in a login shell, manager environment, or service configuration does not prove that the running application inherited it or that its HTTP library uses it. Account for runtime startup, application overrides, user managers, and container boundaries.
+
+Proxy routing and TLS trust are separate concerns. An application can reach the proxy successfully but reject certificates from a private CA or TLS-inspecting proxy. Configure trust using the application's supported certificate mechanism rather than disabling TLS verification; the Node.js guide above includes runtime-specific trust options. Keep credentials out of documentation, source-controlled configuration, and broadly readable startup-option strings.
